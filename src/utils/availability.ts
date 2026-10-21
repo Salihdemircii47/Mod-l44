@@ -2,6 +2,10 @@
 import type { SectorId } from "../data/sectors";
 import { loadResourceSettings } from "../pages/ResourcesPage";
 
+import { isResourceAllowed } from "./serviceResources";
+import { resourceDefaults } from "../pages/ResourcesPage";
+
+
 export type BookingForCheck = {
   sectorId: SectorId;
   date: string;
@@ -9,6 +13,7 @@ export type BookingForCheck = {
   resource: string;
   duration: number;
   status: string;
+  additionalResources?: string[];
 };
 
 type AvailabilityRequest = {
@@ -18,6 +23,7 @@ type AvailabilityRequest = {
   duration: number;
   resource: string;
   appointments: BookingForCheck[];
+  serviceId?: string
 };
 
 export type AvailabilityResult = {
@@ -87,6 +93,24 @@ export function checkAvailability(
   } = request;
 
   const rule = sectorRules[sectorId];
+  
+if (
+  request.serviceId &&
+  !isResourceAllowed(
+    sectorId,
+    request.serviceId,
+    resource,
+    resourceDefaults[sectorId].map((item) => item.name)
+  )
+) {
+  return {
+    available: false,
+    reason:
+      `${resource}, seçilen hizmet için yetkili ` +
+      "veya uygun kaynak olarak tanımlanmamış.",
+  };
+}
+
 
   if (
     !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
@@ -182,7 +206,12 @@ export function checkAvailability(
     if (
       booking.sectorId !== sectorId ||
       booking.date !== date ||
-      booking.resource !== resource ||
+      
+(
+  booking.resource !== resource &&
+  !(booking.additionalResources ?? []).includes(resource)
+) ||
+
       booking.status === "İptal"
     ) {
       return false;
