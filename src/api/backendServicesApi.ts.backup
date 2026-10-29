@@ -1,0 +1,56 @@
+export interface BackendService {
+  id: number;
+  name: string;
+  sector: string;
+  description: string | null;
+  durationMinutes: number;
+  price: number;
+}
+
+export interface CreateBackendService {
+  name: string;
+  sector: string;
+  description?: string | null;
+  durationMinutes: number;
+  price: number;
+}
+
+const BASE_URL = (
+  import.meta.env.VITE_API_BASE_URL ??
+  "http://localhost:5187"
+).replace(/\/$/, "");
+
+export async function getBackendServices():
+  Promise<BackendService[]> {
+  const response = await fetch(`${BASE_URL}/api/Services`, {
+    headers: { Accept: "application/json" },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Hizmetler okunamadi: ${response.status}`);
+  }
+
+  return response.json() as Promise<BackendService[]>;
+}
+
+export async function createBackendService(
+  input: CreateBackendService
+): Promise<BackendService> {
+  const response = await fetch(`${BASE_URL}/api/Services`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify(input),
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `Hizmet kaydedilemedi (${response.status}): ` +
+      (await response.text())
+    );
+  }
+
+  return response.json() as Promise<BackendService>;
+}

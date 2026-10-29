@@ -1,11 +1,36 @@
 
+import { useCallback, useEffect, useState } from "react";
 import {
-  CalendarDays, Users, CheckCircle2, Activity,
-  Plus, Scissors, Truck, HardHat, ArrowUpRight,
-  ArrowRight, Clock3, Zap, TrendingUp
+  CalendarDays,
+  Users,
+  CheckCircle2,
+  BriefcaseBusiness,
+  Plus,
+  RefreshCw,
+  Scissors,
+  Truck,
+  HardHat,
 } from "lucide-react";
+
 import { sectors } from "../data/sectors";
 import type { SectorId } from "../data/sectors";
+
+import {
+  getBackendAppointments,
+  type BackendAppointment,
+} from "../api/backendAppointmentsApi";
+
+import {
+  getBackendResources,
+  type BackendResource,
+} from "../api/backendResourcesApi";
+
+import {
+  getBackendServices,
+  type BackendService,
+} from "../api/backendServicesApi";
+
+import { normalizeSector } from "../utils/sectorMapping";
 
 type DashboardProps = {
   sectorId: SectorId;
@@ -19,275 +44,381 @@ const sectorIcons = {
   construction: HardHat,
 };
 
-const statIcons = [CalendarDays, Users, CheckCircle2, Activity];
+function getTurkeyDate(iso: string): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Istanbul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(iso));
+}
 
-const week = [
-  { day: "Pzt", value: 52 },
-  { day: "Sal", value: 74 },
-  { day: "Çar", value: 61 },
-  { day: "Per", value: 89 },
-  { day: "Cum", value: 70 },
-  { day: "Cmt", value: 98 },
-  { day: "Paz", value: 47 },
-];
+function formatTurkeyDate(iso: string): string {
+  return new Intl.DateTimeFormat("tr-TR", {
+    timeZone: "Europe/Istanbul",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(new Date(iso));
+}
 
-const statusColors: Record<string, string> = {
-  "Onaylandı": "bg-emerald-400/10 text-emerald-400",
-  "Devam Ediyor": "bg-blue-400/10 text-blue-400",
-  "Bekliyor": "bg-amber-400/10 text-amber-400",
-};
+function formatTurkeyTime(iso: string): string {
+  return new Intl.DateTimeFormat("tr-TR", {
+    timeZone: "Europe/Istanbul",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(iso));
+}
 
-const panel = "rounded-2xl border border-[#20324c] bg-[#101d30]";
+function isCancelled(status: string): boolean {
+  return ["cancelled", "canceled", "iptal"].includes(
+    status.toLowerCase()
+  );
+}
 
 export default function Dashboard({
-  sectorId, onSectorChange, onNewAppointment
+  sectorId,
+  onSectorChange,
+  onNewAppointment,
 }: DashboardProps) {
-  const sector = sectors.find(s => s.id === sectorId)!;
+  const [appointments, setAppointments] =
+    useState<BackendAppointment[]>([]);
+
+  const [resources, setResources] =
+    useState<BackendResource[]>([]);
+
+  const [services, setServices] =
+    useState<BackendService[]>([]);
+
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError("");
+
+    try {
+      const [appointmentData, resourceData, serviceData] =
+        await Promise.all([
+          getBackendAppointments(),
+          getBackendResources(),
+          getBackendServices(),
+        ]);
+
+      setAppointments(appointmentData);
+      setResources(resourceData);
+      setServices(serviceData);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Backend verileri alınamadı."
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+
+    const onUpdated = () => void refresh();
+
+    window.addEventListener(
+      "mod44:appointments-updated",
+      onUpdated
+    );
+
+    return () => {
+      window.removeEventListener(
+        "mod44:appointments-updated",
+        onUpdated
+      );
+    };
+  }, [refresh]);
+
+  const sectorResources = resources.filter(
+    (item) =>
+      normalizeSector(item.sector) === sectorId
+  );
+
+  const activeResources = sectorResources.filter(
+    (item) => item.isActive
+  );
+
+  const sectorServices = services.filter(
+    (item) =>
+      normalizeSector(item.sector) === sectorId
+  );
+
+  const resourceIds = new Set(
+    sectorResources.map((resource) => resource.id)
+  );
+
+  const serviceIds = new Set(
+    sectorServices.map((service) => service.id)
+  );
+
+  const sectorAppointments = appointments.filter(
+    (appointment) =>
+      serviceIds.has(appointment.serviceId) ||
+      resourceIds.has(appointment.resourceId)
+  );
+
+  const today = getTurkeyDate(new Date().toISOString());
+
+  const todayAppointments = sectorAppointments.filter(
+    (appointment) =>
+      getTurkeyDate(appointment.startTime) === today &&
+      !isCancelled(appointment.status)
+  );
+
+  const activeAppointments = sectorAppointments.filter(
+    (appointment) => !isCancelled(appointment.status)
+  );
+
+  const cancelledAppointments = sectorAppointments.filter(
+    (appointment) => isCancelled(appointment.status)
+  );
+
+  const upcomingAppointments = activeAppointments
+    .filter(
+      (appointment) =>
+        new Date(appointment.startTime).getTime() >= Date.now()
+    )
+    .sort(
+      (a, b) =>
+        new Date(a.startTime).getTime() -
+        new Date(b.startTime).getTime()
+    )
+    .slice(0, 8);
+
+  const stats = [
+    {
+      label: "Bugünkü Randevular",
+      value: todayAppointments.length,
+      icon: CalendarDays,
+    },
+    {
+      label: "Aktif Kaynaklar",
+      value: activeResources.length,
+      icon: Users,
+    },
+    {
+      label: "Aktif Randevular",
+      value: activeAppointments.length,
+      icon: CheckCircle2,
+    },
+    {
+      label: "Tanımlı Hizmetler",
+      value: sectorServices.length,
+      icon: BriefcaseBusiness,
+    },
+  ];
 
   return (
-    <div className="mx-auto max-w-[1500px] space-y-7">
-
-      {/* Başlık */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
+    <div className="mx-auto max-w-[1500px] space-y-6">
+      <header className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-[#203653] bg-[#101d30] p-6">
         <div>
-          <div className="flex items-center gap-2 text-[10px] font-bold tracking-[2px] text-cyan-400">
-            <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_12px_#34d399]" />
-            SMART OPERATIONS CENTER
-          </div>
-          <h1 className="mt-3 text-3xl font-bold tracking-tight text-white">
-            Genel Bakış <span className="text-blue-400">.</span>
+          <p className="text-xs font-bold tracking-widest text-cyan-400">
+            MOD44 / OPERASYON MERKEZİ
+          </p>
+
+          <h1 className="mt-3 text-3xl font-bold text-white">
+            Genel Bakış
           </h1>
-          <p className="mt-2 text-sm text-[#7990ae]">
-            Tüm operasyonlarınız tek ekranda, kontrol sizde.
+
+          <p className="mt-2 text-sm text-[#8299b7]">
+            PostgreSQL üzerinden güncel operasyon verileri
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={onNewAppointment}
-          className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 px-5 py-3 text-xs font-semibold text-white shadow-lg shadow-blue-600/20 transition hover:brightness-110"
-        >
-          <Plus size={18} /> Yeni Randevu
-        </button>
-      </div>
-
-      {/* Sektör seçimi */}
-      <section>
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-sm font-bold text-white">Çalışma Alanları</h2>
-          <span className="text-[11px] text-[#6e86a7]">3 farklı sektör</span>
-        </div>
-
-        <div className="grid gap-3 md:grid-cols-3">
-          {sectors.map(item => {
-            const Icon = sectorIcons[item.id];
-            const active = sectorId === item.id;
-
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => onSectorChange(item.id)}
-                className={`group flex items-center gap-3 rounded-2xl border p-4 text-left transition-all hover:-translate-y-1 ${
-                  active
-                    ? "border-blue-500 bg-gradient-to-br from-[#15345b] to-[#13243e] shadow-lg shadow-blue-600/10"
-                    : "border-[#20324c] bg-[#101d30] hover:border-[#3f628f]"
-                }`}
-              >
-                <div className={`rounded-xl p-3 ${
-                  active ? "bg-blue-500 text-white" : "bg-[#1a3454] text-cyan-400"
-                }`}>
-                  <Icon size={22} />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="text-xs font-bold text-white">{item.name}</p>
-                  <p className="mt-1 text-[10px] text-[#8b9fbc]">
-                    {active ? "● Aktif çalışma alanı" : "Çalışma alanına geç"}
-                  </p>
-                </div>
-                <ArrowUpRight size={17} className="text-[#6382ab]" />
-              </button>
-            );
-          })}
-        </div>
-      </section>
-
-      {/* İstatistik kartları */}
-      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        {sector.stats.map((stat, i) => {
-          const Icon = statIcons[i];
-          const colors = [
-            "from-blue-500 to-cyan-400",
-            "from-violet-600 to-fuchsia-400",
-            "from-emerald-600 to-teal-400",
-            "from-pink-600 to-rose-400",
-          ];
-
-          return (
-            <div
-              key={stat.label}
-              className={`${panel} relative overflow-hidden p-5 transition hover:-translate-y-1 hover:border-[#42658e]`}
-            >
-              <div className={`absolute left-0 top-0 h-[3px] w-full bg-gradient-to-r ${colors[i]}`} />
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-[#92a6c4]">{stat.label}</span>
-                <div className={`rounded-xl bg-gradient-to-br ${colors[i]} p-2.5 text-white`}>
-                  <Icon size={18} />
-                </div>
-              </div>
-              <p className="mt-5 text-3xl font-bold tracking-tight text-white">{stat.value}</p>
-              <p className="mt-2 text-[11px] text-[#6682a5]">{stat.detail}</p>
-            </div>
-          );
-        })}
-      </section>
-
-      {/* Grafik alanı */}
-      <section className="grid gap-4 xl:grid-cols-[1.6fr_1fr]">
-        <div className={`${panel} p-6`}>
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <h2 className="text-sm font-bold text-white">Operasyon Analizi</h2>
-              <p className="mt-1 text-xs text-[#7087a6]">Örnek haftalık iş yoğunluğu</p>
-            </div>
-            <span className="rounded-lg border border-[#2a4262] bg-[#172a44] px-3 py-2 text-[11px] text-cyan-300">
-              Bu Hafta
-            </span>
-          </div>
-
-          <div className="mt-7 flex items-end justify-between gap-3 border-b border-[#29405d] pb-3">
-            {week.map((item, i) => (
-              <div key={item.day} className="flex flex-1 flex-col items-center gap-3">
-                <div className="flex h-44 w-full max-w-14 items-end justify-center">
-                  <div
-                    className={`w-full max-w-9 rounded-t-lg transition-all duration-500 ${
-                      i === 5
-                        ? "bg-gradient-to-t from-violet-700 to-fuchsia-400 shadow-[0_0_22px_#8b5cf644]"
-                        : "bg-gradient-to-t from-blue-700 to-cyan-400"
-                    }`}
-                    style={{ height: `${item.value}%` }}
-                    title={`${item.day}: ${item.value} örnek yoğunluk puanı`}
-                  />
-                </div>
-                <span className="text-[10px] text-[#758da9]">{item.day}</span>
-              </div>
-            ))}
-          </div>
-
-          <div className="mt-4 flex items-center gap-2 text-xs text-[#8ca5c6]">
-            <TrendingUp size={15} className="text-emerald-400" />
-            Gösterim amaçlı yoğunluk verisi
-          </div>
-        </div>
-
-        <div className={`${panel} p-6`}>
-          <h2 className="text-sm font-bold text-white">Kapasite Dağılımı</h2>
-          <p className="mt-1 text-xs text-[#7087a6]">Örnek kaynak kullanımı</p>
-
-          <div className="flex justify-center py-7">
-            <div
-              className="relative h-44 w-44 rounded-full"
-              style={{
-                background: "conic-gradient(#00bcf2 0% 58%, #9061f9 58% 78%, #263b58 78% 100%)"
-              }}
-            >
-              <div className="absolute inset-5 flex flex-col items-center justify-center rounded-full bg-[#101d30]">
-                <span className="text-[10px] text-[#8ca4c4]">Kullanım</span>
-                <strong className="mt-1 text-3xl text-white">78%</strong>
-              </div>
-            </div>
-          </div>
-
-          <div className="space-y-3 text-xs">
-            {[
-              ["Aktif", "58%", "#00bcf2"],
-              ["Planlı", "20%", "#9061f9"],
-              ["Müsait", "22%", "#263b58"],
-            ].map(([name, value, color]) => (
-              <div key={name} className="flex items-center gap-2">
-                <span className="h-2.5 w-2.5 rounded-full" style={{ background: color }} />
-                <span className="flex-1 text-[#94a8c6]">{name}</span>
-                <strong className="text-white">{value}</strong>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* Tablo ve aktivite */}
-      <section className="grid gap-4 xl:grid-cols-[1.6fr_1fr]">
-        <div className={`${panel} min-w-0 p-6`}>
-          <div className="mb-5 flex items-center justify-between">
-            <div>
-              <h2 className="text-sm font-bold text-white">Yaklaşan Randevular</h2>
-              <p className="mt-1 text-xs text-[#7087a6]">Planlanan iş ve kaynaklar</p>
-            </div>
-            <CalendarDays size={19} className="text-cyan-400" />
-          </div>
-
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[580px] text-left text-xs">
-              <thead>
-                <tr className="border-b border-[#263a55] text-[#6e88a9]">
-                  {["Müşteri / İş", "Hizmet", "Kaynak", "Saat", "Durum"].map(h => (
-                    <th key={h} className="pb-4 pr-3 font-medium">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {sector.appointments.map(a => (
-                  <tr key={a.id} className="border-b border-[#1b2e45]">
-                    <td className="py-5 pr-3 font-semibold text-white">{a.customer}</td>
-                    <td className="py-5 pr-3 text-[#90a5c2]">{a.service}</td>
-                    <td className="py-5 pr-3 text-[#90a5c2]">{a.resource}</td>
-                    <td className="py-5 pr-3 text-white">{a.time}</td>
-                    <td className="py-5">
-                      <span className={`whitespace-nowrap rounded-lg px-2 py-1.5 text-[10px] font-semibold ${statusColors[a.status] || ""}`}>
-                        {a.status}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+        <div className="flex flex-wrap gap-3">
+          <button
+            type="button"
+            onClick={() => void refresh()}
+            disabled={loading}
+            className="flex items-center gap-2 rounded-xl border border-[#355679] px-4 py-3 text-sm text-white disabled:opacity-50"
+          >
+            <RefreshCw size={16} />
+            Yenile
+          </button>
 
           <button
             type="button"
             onClick={onNewAppointment}
-            className="mt-5 flex items-center gap-2 text-xs font-semibold text-cyan-400 hover:text-white"
+            className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 px-4 py-3 text-sm font-semibold text-white"
           >
-            Randevu takvimine git <ArrowRight size={15} />
+            <Plus size={16} />
+            Yeni Randevu
           </button>
         </div>
+      </header>
 
-        <div className={`${panel} p-6`}>
-          <h2 className="text-sm font-bold text-white">Sistem Durumu</h2>
-          <p className="mt-1 text-xs text-[#7087a6]">Geliştirme aşamaları</p>
+      {/* SEKTÖR SEÇİMİ */}
+      <div className="grid gap-3 md:grid-cols-3">
+        {sectors.map((sector) => {
+          const Icon = sectorIcons[sector.id];
+          const selected = sectorId === sector.id;
 
-          {[
-            { icon: CheckCircle2, title: "Frontend hazır", desc: "React arayüzü çalışıyor", color: "text-emerald-400" },
-            { icon: Zap, title: "Planlama arayüzü", desc: "Takvim geliştirilecek", color: "text-cyan-400" },
-            { icon: Clock3, title: ".NET API", desc: "Backend sonraki aşamada", color: "text-amber-400" },
-          ].map(item => {
-            const Icon = item.icon;
-            return (
-              <div key={item.title} className="mt-6 flex items-center gap-3">
-                <div className="rounded-xl bg-[#1a304d] p-3">
-                  <Icon size={20} className={item.color} />
-                </div>
-                <div>
-                  <p className="text-xs font-semibold text-white">{item.title}</p>
-                  <p className="mt-1 text-[11px] text-[#7890b1]">{item.desc}</p>
-                </div>
+          return (
+            <button
+              key={sector.id}
+              type="button"
+              onClick={() => onSectorChange(sector.id)}
+              className={`flex items-center gap-3 rounded-2xl border p-4 text-left ${
+                selected
+                  ? "border-blue-500 bg-[#15345b]"
+                  : "border-[#20324c] bg-[#101d30]"
+              }`}
+            >
+              <Icon
+                size={24}
+                className="text-cyan-400"
+              />
+
+              <div>
+                <p className="text-sm font-bold text-white">
+                  {sector.name}
+                </p>
+
+                <p className="text-xs text-slate-400">
+                  {selected ? "Aktif sektör" : "Sektörü aç"}
+                </p>
               </div>
-            );
-          })}
+            </button>
+          );
+        })}
+      </div>
+
+      {error && (
+        <div
+          role="alert"
+          className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300"
+        >
+          Backend bağlantı hatası: {error}
         </div>
+      )}
+
+      {loading && (
+        <p className="text-sm text-slate-400">
+          Veriler yükleniyor...
+        </p>
+      )}
+
+      {/* GERÇEK İSTATİSTİKLER */}
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {stats.map((stat) => {
+          const Icon = stat.icon;
+
+          return (
+            <div
+              key={stat.label}
+              className="rounded-2xl border border-[#20324c] bg-[#101d30] p-5"
+            >
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-[#91a9c9]">
+                  {stat.label}
+                </p>
+
+                <Icon size={20} className="text-cyan-400" />
+              </div>
+
+              <p className="mt-4 text-3xl font-bold text-white">
+                {loading ? "..." : stat.value}
+              </p>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* BUGÜNÜN RANDEVULARI */}
+      <section className="rounded-2xl border border-[#20324c] bg-[#101d30] p-6">
+        <div className="mb-4">
+          <h2 className="text-lg font-bold text-white">
+            Bugünkü Randevular
+          </h2>
+
+          <p className="mt-1 text-xs text-slate-400">
+            Türkiye saatine göre bugünün kayıtları
+          </p>
+        </div>
+
+        {!loading && todayAppointments.length === 0 ? (
+          <p className="text-sm text-slate-400">
+            Bugün için randevu bulunmuyor.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {todayAppointments.map((appointment) => (
+              <div
+                key={appointment.id}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#29415d] bg-[#0b1728] p-4"
+              >
+                <div>
+                  <p className="font-semibold text-white">
+                    {appointment.customerName}
+                  </p>
+
+                  <p className="mt-1 text-xs text-slate-400">
+                    {appointment.serviceName} ·{" "}
+                    {appointment.resourceName}
+                  </p>
+                </div>
+
+                <span className="rounded-lg bg-cyan-500/10 px-3 py-2 text-sm font-semibold text-cyan-300">
+                  {formatTurkeyTime(appointment.startTime)}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
-      <p className="pb-4 text-center text-[10px] text-[#536b8c]">
-        MOD44 SMART OPERATIONS · DEMO PROTOTİPİ · VERİLER ÖRNEKTİR
+      {/* YAKLAŞAN RANDEVULAR */}
+      <section className="rounded-2xl border border-[#20324c] bg-[#101d30] p-6">
+        <h2 className="mb-4 text-lg font-bold text-white">
+          Yaklaşan Randevular
+        </h2>
+
+        {!loading && upcomingAppointments.length === 0 ? (
+          <p className="text-sm text-slate-400">
+            Yaklaşan randevu bulunmuyor.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {upcomingAppointments.map((appointment) => (
+              <div
+                key={appointment.id}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#29415d] bg-[#0b1728] p-4"
+              >
+                <div>
+                  <p className="font-semibold text-white">
+                    {appointment.customerName}
+                  </p>
+
+                  <p className="mt-1 text-xs text-slate-400">
+                    {appointment.serviceName} ·{" "}
+                    {appointment.resourceName}
+                  </p>
+
+                  <p className="mt-1 text-xs text-slate-500">
+                    {formatTurkeyDate(appointment.startTime)}
+                  </p>
+                </div>
+
+                <span className="text-sm font-semibold text-cyan-300">
+                  {formatTurkeyTime(appointment.startTime)}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <p className="text-xs text-slate-500">
+        İptal edilen randevu sayısı: {cancelledAppointments.length}
       </p>
     </div>
   );

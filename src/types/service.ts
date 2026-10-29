@@ -1,4 +1,3 @@
-
 import type { SectorId } from "../data/sectors";
 
 export type ServiceItem = {

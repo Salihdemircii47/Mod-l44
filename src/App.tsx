@@ -1,4 +1,5 @@
 
+
 import { useState } from "react";
 import { Bell, Search, ChevronDown } from "lucide-react";
 import Sidebar from "./components/Sidebar";
@@ -57,6 +58,7 @@ export default function App() {
         </header>
 
         <main className="px-5 py-8 lg:px-9">
+          
           {activePage === "Genel Bakış" ? (
             <Dashboard
               sectorId={sectorId}

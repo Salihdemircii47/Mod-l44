@@ -1,0 +1,284 @@
+import { useEffect, useState } from "react";
+import type { FormEvent } from "react";
+import type { SectorId } from "../data/sectors";
+
+import {
+  getBackendResources,
+  createBackendResource,
+  updateBackendResource,
+  deleteBackendResource,
+  type BackendResource,
+} from "../api/backendResourcesApi";
+
+import {
+  normalizeSector,
+  toBackendSector,
+} from "../utils/sectorMapping";
+
+type Props = {
+  sectorId: SectorId;
+};
+
+export default function BackendResourcesPanel({
+  sectorId,
+}: Props) {
+  const [resources, setResources] = useState<BackendResource[]>([]);
+  const [editing, setEditing] = useState<BackendResource | null>(null);
+
+  const [name, setName] = useState("");
+  const [type, setType] = useState("");
+  const [isActive, setIsActive] = useState(true);
+
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  async function refresh() {
+    const result = await getBackendResources();
+    setResources(result);
+  }
+
+  useEffect(() => {
+    let alive = true;
+
+    getBackendResources()
+      .then((data) => {
+        if (alive) {
+          setResources(data);
+          setError("");
+        }
+      })
+      .catch((err: unknown) => {
+        if (alive) {
+          setError(
+            err instanceof Error
+              ? err.message
+              : "Kaynaklar yuklenemedi."
+          );
+        }
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  function resetForm() {
+    setEditing(null);
+    setName("");
+    setType("");
+    setIsActive(true);
+  }
+
+  function startEdit(item: BackendResource) {
+    setEditing(item);
+    setName(item.name);
+    setType(item.type);
+    setIsActive(item.isActive);
+    setError("");
+    setMessage("");
+  }
+
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (saving || !name.trim() || !type.trim()) return;
+
+    setSaving(true);
+    setError("");
+    setMessage("");
+
+    try {
+      if (editing) {
+        await updateBackendResource(editing.id, {
+          name: name.trim(),
+          type: type.trim(),
+          sector: editing.sector,
+          isActive,
+        });
+      } else {
+        await createBackendResource({
+          name: name.trim(),
+          type: type.trim(),
+          sector: toBackendSector(sectorId),
+        });
+      }
+
+      await refresh();
+
+      setMessage(
+        editing
+          ? "Kaynak PostgreSQL'de guncellendi."
+          : "Kaynak PostgreSQL'e kaydedildi."
+      );
+
+      resetForm();
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Kaynak kaydedilemedi."
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function remove(item: BackendResource) {
+    if (
+      !window.confirm(
+        `"${item.name}" kaynagini silmek istiyor musunuz?`
+      )
+    ) {
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+    setMessage("");
+
+    try {
+      await deleteBackendResource(item.id);
+      await refresh();
+
+      if (editing?.id === item.id) resetForm();
+
+      setMessage("Kaynak veritabanindan silindi.");
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Kaynak silinemedi."
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const filtered = resources.filter(
+    (item) => normalizeSector(item.sector) === sectorId
+  );
+
+  return (
+    <section className="space-y-5 rounded-2xl border border-cyan-500/30 bg-[#101d30] p-6 text-white">
+      <div>
+        <h2 className="text-xl font-bold">
+          Gercek Kaynak Yonetimi
+        </h2>
+        <p className="mt-1 text-sm text-slate-400">
+          PostgreSQL / Personel / Arac / Ekipman
+        </p>
+      </div>
+
+      <form onSubmit={save} className="grid gap-3 md:grid-cols-3">
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Kaynak adi"
+          maxLength={150}
+          required
+          className="rounded-xl border border-slate-600 bg-[#091322] p-3"
+        />
+
+        <input
+          value={type}
+          onChange={(e) => setType(e.target.value)}
+          placeholder="Tur: Personel, Arac, Ekipman"
+          maxLength={50}
+          required
+          className="rounded-xl border border-slate-600 bg-[#091322] p-3"
+        />
+
+        <button
+          type="submit"
+          disabled={saving || !name.trim() || !type.trim()}
+          className="rounded-xl bg-blue-600 p-3 font-semibold disabled:opacity-50"
+        >
+          {saving
+            ? "Kaydediliyor..."
+            : editing
+              ? "Degisiklikleri Kaydet"
+              : "Yeni Kaynak Ekle"}
+        </button>
+      </form>
+
+      {editing && (
+        <div className="flex items-center gap-4">
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={isActive}
+              onChange={(e) => setIsActive(e.target.checked)}
+            />
+            Kaynak aktif
+          </label>
+
+          <button
+            type="button"
+            onClick={resetForm}
+            className="text-sm text-cyan-400"
+          >
+            Duzenlemeyi Iptal Et
+          </button>
+        </div>
+      )}
+
+      {error && <p role="alert" className="text-red-400">{error}</p>}
+      {message && <p role="status" className="text-emerald-400">{message}</p>}
+
+      <p className="text-sm text-emerald-400">
+        Gercek kaynak sayisi: {filtered.length}
+      </p>
+
+      {loading ? (
+        <p>Kaynaklar yukleniyor...</p>
+      ) : filtered.length === 0 ? (
+        <p className="text-sm text-slate-400">
+          Bu sektorde henuz kayit bulunmuyor.
+        </p>
+      ) : (
+        <div className="grid gap-3 md:grid-cols-2">
+          {filtered.map((item) => (
+            <div
+              key={item.id}
+              className="rounded-xl border border-[#263b58] bg-[#091322] p-4"
+            >
+              <h3 className="font-semibold">{item.name}</h3>
+              <p className="mt-1 text-xs text-slate-400">
+                ID: {item.id} / {item.type}
+              </p>
+
+              <p className="mt-2 text-sm">
+                Durum: {item.isActive ? "Aktif" : "Pasif"}
+              </p>
+
+              <div className="mt-4 flex gap-2">
+                <button
+                  type="button"
+                  disabled={saving}
+                  onClick={() => startEdit(item)}
+                  className="rounded-lg border border-blue-500/30 px-3 py-2 text-sm text-blue-300"
+                >
+                  Duzenle
+                </button>
+
+                <button
+                  type="button"
+                  disabled={saving}
+                  onClick={() => void remove(item)}
+                  className="rounded-lg border border-red-500/30 px-3 py-2 text-sm text-red-400"
+                >
+                  Sil
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}

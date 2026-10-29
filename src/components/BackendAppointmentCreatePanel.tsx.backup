@@ -1,0 +1,750 @@
+
+import { useEffect, useRef, useState } from "react";
+import type { FormEvent } from "react";
+import type { SectorId } from "../data/sectors";
+
+import {
+  getBackendServices,
+  type BackendService,
+} from "../api/backendServicesApi";
+
+import {
+  getBackendResources,
+  type BackendResource,
+} from "../api/backendResourcesApi";
+
+import {
+  createBackendAppointment,
+} from "../api/backendAppointmentsApi";
+
+import {
+  getResourceAvailability,
+  getMultiResourceAvailability,
+  type AvailableSlot,
+} from "../api/backendAvailabilityApi";
+
+import { normalizeSector } from "../utils/sectorMapping";
+import {
+  createMultiResourceAppointment,
+} from "../api/backendMultiResourceAppointmentsApi";
+
+type Customer = {
+  id: number;
+  fullName: string;
+};
+
+type Props = {
+  sectorId: SectorId;
+};
+
+const BASE_URL = (
+  import.meta.env.VITE_API_BASE_URL ??
+  "http://localhost:5187"
+).replace(/\/$/, "");
+
+function errorText(error: unknown): string {
+  return error instanceof Error
+    ? error.message
+    : "Beklenmeyen bir hata oluştu.";
+}
+
+function todayInTurkey(): string {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Istanbul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+
+  const read = (type: string) =>
+    parts.find((p) => p.type === type)?.value ?? "";
+
+  return `${read("year")}-${read("month")}-${read("day")}`;
+}
+
+function isFutureSlot(slot: AvailableSlot): boolean {
+  return new Date(slot.startUtc).getTime() > Date.now();
+}
+
+export default function BackendAppointmentCreatePanel({
+  sectorId,
+}: Props) {
+  // API'den gelen gerçek veriler
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [services, setServices] = useState<BackendService[]>([]);
+  const [resources, setResources] = useState<BackendResource[]>([]);
+
+  // Form seçimleri
+  const [customerId, setCustomerId] = useState("");
+  const [serviceId, setServiceId] = useState("");
+  const [resourceId, setResourceId] = useState("");
+
+  // Yardımcı kaynakların sayısal ID'leri
+  const [additionalResourceIds, setAdditionalResourceIds] =
+    useState<number[]>([]);
+
+  const [date, setDate] = useState(todayInTurkey);
+  const [notes, setNotes] = useState("");
+
+  // Backend'in döndürdüğü müsait saatler
+  const [slots, setSlots] = useState<AvailableSlot[]>([]);
+
+  const [selectedSlot, setSelectedSlot] =
+    useState<AvailableSlot | null>(null);
+
+  // Ekran durumları
+  const [loading, setLoading] = useState(true);
+  const [checking, setChecking] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  // Eski müsaitlik sorgularının sonuçlarını geçersiz kılar.
+  const queryVersion = useRef(0);
+
+  // Aynı anda iki kayıt isteği başlatılmasını engeller.
+  const savingRef = useRef(false);
+
+  // 1. Müşteri, hizmet ve kaynakları yükle
+  useEffect(() => {
+    let alive = true;
+
+    async function loadData() {
+      setLoading(true);
+      setError("");
+
+      try {
+        const [customerResponse, serviceData, resourceData] =
+          await Promise.all([
+            fetch(`${BASE_URL}/api/Customers`),
+            getBackendServices(),
+            getBackendResources(),
+          ]);
+
+        if (!customerResponse.ok) {
+          throw new Error(
+            `Müşteriler alınamadı: HTTP ${customerResponse.status}`
+          );
+        }
+
+        const customerData =
+          (await customerResponse.json()) as Customer[];
+
+        if (!alive) return;
+
+        setCustomers(customerData);
+        setServices(serviceData);
+        setResources(resourceData);
+      } catch (err) {
+        if (alive) {
+          setError(errorText(err));
+        }
+      } finally {
+        if (alive) {
+          setLoading(false);
+        }
+      }
+    }
+
+    void loadData();
+
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // 2. Sektöre uygun hizmetleri filtrele
+  const filteredServices = services.filter(
+    (service) =>
+      normalizeSector(service.sector) === sectorId
+  );
+
+  // 3. Sektördeki aktif kaynakları filtrele
+  const filteredResources = resources.filter(
+    (resource) =>
+      normalizeSector(resource.sector) === sectorId &&
+      resource.isActive
+  );
+
+  const selectedService = filteredServices.find(
+    (service) => service.id === Number(serviceId)
+  );
+
+  const mainResourceId = Number(resourceId);
+
+  // Ana kaynak + yardımcı kaynaklar
+  const selectedResourceIds = resourceId
+    ? [
+        mainResourceId,
+        ...additionalResourceIds.filter(
+          (id) => id !== mainResourceId
+        ),
+      ]
+    : [];
+
+  const isMultiResource = selectedResourceIds.length > 1;
+
+  function invalidateAvailability() {
+    queryVersion.current += 1;
+    setSlots([]);
+    setSelectedSlot(null);
+    setChecking(false);
+    setError("");
+    setMessage("");
+  }
+
+  // 4. Sektör değiştiğinde eski seçimleri sıfırla
+  useEffect(() => {
+    setServiceId("");
+    setResourceId("");
+    setAdditionalResourceIds([]);
+    invalidateAvailability();
+  }, [sectorId]);
+
+  // 5. Yardımcı kaynak seç / kaldır
+  function toggleAdditionalResource(id: number) {
+    if (checking || saving) return;
+
+    invalidateAvailability();
+
+    setAdditionalResourceIds((previous) =>
+      previous.includes(id)
+        ? previous.filter((item) => item !== id)
+        : [...previous, id]
+    );
+  }
+
+  // 6. Ana kaynak değiştir
+  function changeMainResource(value: string) {
+    invalidateAvailability();
+    setResourceId(value);
+
+    const newMainId = Number(value);
+
+    // Ana kaynak yardımcı listesinde kalmasın
+    setAdditionalResourceIds((previous) =>
+      previous.filter((id) => id !== newMainId)
+    );
+  }
+
+  // 7. Tek veya çoklu kaynak müsaitliğini sorgula
+  async function checkAvailability() {
+    if (savingRef.current || saving) return;
+
+    if (!resourceId || !serviceId || !date) {
+      setError("Önce hizmet, kaynak ve tarih seçmelisin.");
+      return;
+    }
+
+    if (
+      !selectedService ||
+      !filteredResources.some(
+        (resource) => resource.id === mainResourceId
+      )
+    ) {
+      setError("Geçerli hizmet ve aktif kaynak seçmelisin.");
+      return;
+    }
+
+    const currentVersion = ++queryVersion.current;
+    const ids = [...selectedResourceIds];
+
+    setChecking(true);
+    setError("");
+    setMessage("");
+    setSlots([]);
+    setSelectedSlot(null);
+
+    try {
+      const result =
+        ids.length === 1
+          ? await getResourceAvailability(
+              ids[0],
+              Number(serviceId),
+              date
+            )
+          : await getMultiResourceAvailability(
+              ids,
+              Number(serviceId),
+              date
+            );
+
+      // Kullanıcı sorgu sırasında seçim değiştirdiyse
+      // eski cevabı gösterme.
+      if (currentVersion !== queryVersion.current) {
+        return;
+      }
+
+      const available = result.availableSlots.filter(
+        isFutureSlot
+      );
+
+      setSlots(available);
+
+      if (available.length === 0) {
+        setMessage(
+          "Seçilen kaynaklar için uygun saat bulunamadı."
+        );
+      } else {
+        setMessage(
+          `${ids.length} kaynak için ` +
+          `${available.length} uygun saat bulundu.`
+        );
+      }
+    } catch (err) {
+      if (currentVersion === queryVersion.current) {
+        setError(errorText(err));
+      }
+    } finally {
+      if (currentVersion === queryVersion.current) {
+        setChecking(false);
+      }
+    }
+  }
+
+  // 8. Randevuyu kaydet
+  async function handleSubmit(
+    event: FormEvent<HTMLFormElement>
+  ) {
+    event.preventDefault();
+
+    if (savingRef.current || checking) return;
+
+    setError("");
+    setMessage("");
+
+    if (
+      !customerId ||
+      !serviceId ||
+      !resourceId ||
+      !selectedSlot
+    ) {
+      setError(
+        "Müşteri, hizmet, kaynak ve uygun saat seçmelisin."
+      );
+      return;
+    }
+
+    // Çoklu kaynaklar için kayıt endpoint'i henüz bağlı değil.
+    // Yanlışlıkla sadece ana kaynak kaydedilmesin.
+   
+    if (!isFutureSlot(selectedSlot)) {
+      setSelectedSlot(null);
+      setError("Bu saat artık geçmişte kaldı. Yeniden sorgula.");
+      return;
+    }
+
+    const requestVersion = queryVersion.current;
+    const slotToSave = selectedSlot;
+    const serviceToSave = Number(serviceId);
+    const resourceToSave = mainResourceId;
+    const customerToSave = Number(customerId);
+    const dateToSave = date;
+
+    savingRef.current = true;
+    setSaving(true);
+
+    try {
+      // Kayıttan hemen önce tekrar kontrol et
+      const resourceIdsToSave = [
+  resourceToSave,
+  ...additionalResourceIds.filter(
+    (id) => id !== resourceToSave
+  ),
+];
+
+const latest =
+  resourceIdsToSave.length === 1
+    ? await getResourceAvailability(
+        resourceToSave,
+        serviceToSave,
+        dateToSave
+      )
+    : await getMultiResourceAvailability(
+        resourceIdsToSave,
+        serviceToSave,
+        dateToSave
+      );
+
+      if (requestVersion !== queryVersion.current) {
+        throw new Error(
+          "Seçimler değişti. Müsait saatleri tekrar sorgula."
+        );
+      }
+
+      const stillAvailable = latest.availableSlots.some(
+        (slot) =>
+          slot.startUtc === slotToSave.startUtc &&
+          slot.endUtc === slotToSave.endUtc &&
+          isFutureSlot(slot)
+      );
+
+      if (!stillAvailable) {
+        setSelectedSlot(null);
+        setSlots(latest.availableSlots.filter(isFutureSlot));
+
+        throw new Error(
+          "Seçilen saat artık müsait değil. Yeni saat seç."
+        );
+      }
+
+     const created =
+  resourceIdsToSave.length === 1
+    ? await createBackendAppointment({
+        customerId: customerToSave,
+        serviceId: serviceToSave,
+        resourceId: resourceToSave,
+        startTime: slotToSave.startUtc,
+        endTime: slotToSave.endUtc,
+        notes: notes.trim() || null,
+      })
+    : await createMultiResourceAppointment({
+        customerId: customerToSave,
+        serviceId: serviceToSave,
+        startTime: slotToSave.startUtc,
+        endTime: slotToSave.endUtc,
+        notes: notes.trim() || null,
+        resources: resourceIdsToSave.map((id, index) => ({
+          resourceId: id,
+          role: index === 0 ? "Primary" : "Assistant",
+        })),
+      });
+
+      setMessage(
+        `Randevu kaydedildi! ID: ${
+          created?.id ?? "API tarafından onaylandı"
+        }`
+      );
+
+      invalidateAvailability();
+
+      // invalidateAvailability mesajı temizler;
+      // başarı mesajını tekrar gösteriyoruz.
+      setMessage(
+        `Randevu başarıyla kaydedildi. ID: ${
+          created?.id ?? "API onayladı"
+        }`
+      );
+
+      setNotes("");
+
+      // Diğer randevu panellerini yenile
+      window.dispatchEvent(
+        new Event("mod44:appointments-updated")
+      );
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  }
+
+  const inputClass =
+    "w-full rounded-xl border border-[#304963] " +
+    "bg-[#0b1728] p-3 text-sm text-white " +
+    "outline-none focus:border-cyan-400";
+
+  return (
+    <section className="space-y-5 rounded-2xl border border-cyan-500/30 bg-[#101d30] p-6 text-white">
+      <div>
+        <h2 className="text-xl font-bold">
+          Gerçek Randevu Oluştur
+        </h2>
+
+        <p className="mt-1 text-sm text-slate-400">
+          PostgreSQL bağlantılı tek ve çoklu kaynak planlama
+        </p>
+      </div>
+
+      {loading ? (
+        <p className="text-sm text-slate-400">
+          Veriler yükleniyor...
+        </p>
+      ) : (
+        <form
+          onSubmit={(event) => void handleSubmit(event)}
+          className="space-y-5"
+        >
+          {/* MÜŞTERİ, HİZMET, KAYNAK, TARİH */}
+          <div className="grid gap-4 md:grid-cols-2">
+
+            <label className="space-y-2 text-sm">
+              <span>Müşteri</span>
+
+              <select
+                required
+                disabled={saving}
+                value={customerId}
+                onChange={(e) => setCustomerId(e.target.value)}
+                className={inputClass}
+              >
+                <option value="">Müşteri seçiniz</option>
+
+                {customers.map((customer) => (
+                  <option
+                    key={customer.id}
+                    value={customer.id}
+                  >
+                    {customer.fullName}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="space-y-2 text-sm">
+              <span>Hizmet</span>
+
+              <select
+                required
+                disabled={saving}
+                value={serviceId}
+                onChange={(e) => {
+                  invalidateAvailability();
+                  setServiceId(e.target.value);
+                }}
+                className={inputClass}
+              >
+                <option value="">Hizmet seçiniz</option>
+
+                {filteredServices.map((service) => (
+                  <option
+                    key={service.id}
+                    value={service.id}
+                  >
+                    {service.name} ({service.durationMinutes} dk)
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="space-y-2 text-sm">
+              <span>Ana kaynak</span>
+
+              <select
+                required
+                disabled={saving}
+                value={resourceId}
+                onChange={(e) =>
+                  changeMainResource(e.target.value)
+                }
+                className={inputClass}
+              >
+                <option value="">Kaynak seçiniz</option>
+
+                {filteredResources.map((resource) => (
+                  <option
+                    key={resource.id}
+                    value={resource.id}
+                  >
+                    {resource.name} ({resource.type})
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="space-y-2 text-sm">
+              <span>Randevu tarihi</span>
+
+              <input
+                type="date"
+                required
+                disabled={saving}
+                min={todayInTurkey()}
+                value={date}
+                onChange={(e) => {
+                  invalidateAvailability();
+                  setDate(e.target.value);
+                }}
+                className={`${inputClass} [color-scheme:dark]`}
+              />
+            </label>
+          </div>
+
+          {/* YARDIMCI KAYNAKLAR */}
+          <div className="space-y-3 rounded-xl border border-[#304963] bg-[#0b1728] p-4">
+            <div>
+              <h3 className="text-sm font-semibold text-white">
+                Yardımcı Kaynaklar (İsteğe Bağlı)
+              </h3>
+
+              <p className="mt-1 text-xs text-slate-400">
+                Birden fazla kaynak seçersen sadece hepsinin
+                ortak müsait olduğu saatler gösterilir.
+              </p>
+            </div>
+
+            <div className="grid gap-2 sm:grid-cols-2">
+              {filteredResources
+                .filter(
+                  (resource) =>
+                    resource.id !== mainResourceId
+                )
+                .map((resource) => (
+                  <label
+                    key={resource.id}
+                    className="flex cursor-pointer items-center gap-3 rounded-lg border border-[#304963] p-3 text-sm text-white"
+                  >
+                    <input
+                      type="checkbox"
+                      disabled={checking || saving}
+                      checked={additionalResourceIds.includes(
+                        resource.id
+                      )}
+                      onChange={() =>
+                        toggleAdditionalResource(resource.id)
+                      }
+                      className="h-4 w-4 accent-cyan-500"
+                    />
+
+                    <span>
+                      {resource.name}
+
+                      <span className="ml-2 text-xs text-slate-400">
+                        {resource.type}
+                      </span>
+                    </span>
+                  </label>
+                ))}
+            </div>
+
+            {filteredResources.length <= 1 && (
+              <p className="text-xs text-amber-300">
+                Bu sektörde henüz başka aktif kaynak yok.
+                Kaynaklar sayfasından ekleyebilirsin.
+              </p>
+            )}
+
+            <p className="text-xs text-cyan-300">
+              Toplam seçilen kaynak: {selectedResourceIds.length}
+            </p>
+          </div>
+
+          {/* MÜSAİTLİK BUTONU */}
+          <button
+            type="button"
+            disabled={
+              checking ||
+              saving ||
+              !resourceId ||
+              !serviceId ||
+              !date
+            }
+            onClick={() => void checkAvailability()}
+            className="rounded-xl border border-cyan-500/40 bg-cyan-500/10 px-5 py-3 text-sm font-semibold text-cyan-300 disabled:opacity-50"
+          >
+            {checking
+              ? "Müsaitlik kontrol ediliyor..."
+              : "Müsait Saatleri Göster"}
+          </button>
+
+          {/* MÜSAİT SAATLER */}
+          {slots.length > 0 && (
+            <div className="space-y-3">
+              <h3 className="text-sm font-semibold">
+                Uygun saatler ({slots.length})
+              </h3>
+
+              <div className="flex flex-wrap gap-2">
+                {slots.map((slot) => {
+                  const selected =
+                    selectedSlot?.startUtc === slot.startUtc;
+
+                  return (
+                    <button
+                      key={slot.startUtc}
+                      type="button"
+                      disabled={checking || saving}
+                      onClick={() => {
+                        setSelectedSlot(slot);
+                        setError("");
+                      }}
+                      className={`rounded-xl border px-4 py-3 text-sm font-semibold transition ${
+                        selected
+                          ? "border-cyan-300 bg-cyan-500 text-white"
+                          : "border-[#304963] bg-[#0b1728] text-slate-300 hover:border-cyan-400"
+                      }`}
+                    >
+                      {slot.startTime}–{slot.endTime}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* SEÇİLEN SAAT */}
+          {selectedSlot && (
+            <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-sm text-emerald-300">
+              Seçilen saat: {selectedSlot.startTime}–
+              {selectedSlot.endTime}
+            </div>
+          )}
+
+          {/* ÇOKLU KAYNAK UYARISI */}
+          {isMultiResource && (
+            <p className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-300">
+              Ortak müsaitlik kontrolü aktiftir.
+              Çoklu kaynak rezervasyonunu PostgreSQL'e
+              kaydetme özelliği henüz bağlanmadı.
+              Bu nedenle kayıt düğmesi geçici olarak kapalıdır.
+            </p>
+          )}
+
+          {/* NOT */}
+          <label className="block space-y-2 text-sm">
+            <span>Not (isteğe bağlı)</span>
+
+            <textarea
+              rows={2}
+              disabled={saving}
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              className={inputClass}
+            />
+          </label>
+
+          {/* RANDEVUYU KAYDET */}
+          <button
+            type="submit"
+            disabled={
+              saving ||
+              checking ||
+              !selectedSlot ||
+              !customerId ||
+              !serviceId ||
+              !resourceId ||
+              isMultiResource
+            }
+            className="w-full rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 py-3 text-sm font-bold disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {saving
+              ? "Randevu kaydediliyor..."
+              : isMultiResource
+                  ? "Randevu kaydediliyor..."
+  		  : "Randevuyu PostgreSQL'e Kaydet"}
+          </button>
+        </form>
+      )}
+
+      {error && (
+        <p
+          role="alert"
+          className="text-sm text-rose-400"
+        >
+          {error}
+        </p>
+      )}
+
+      {message && (
+        <p
+          role="status"
+          className="text-sm text-emerald-400"
+        >
+          {message}
+        </p>
+      )}
+    </section>
+  );
+}

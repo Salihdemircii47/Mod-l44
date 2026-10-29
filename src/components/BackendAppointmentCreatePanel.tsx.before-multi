@@ -1,0 +1,430 @@
+import { useEffect, useState } from "react";
+import type { FormEvent } from "react";
+import type { SectorId } from "../data/sectors";
+
+import {
+  getBackendServices,
+  type BackendService,
+} from "../api/backendServicesApi";
+
+import {
+  getBackendResources,
+  type BackendResource,
+} from "../api/backendResourcesApi";
+
+import {
+  createBackendAppointment,
+} from "../api/backendAppointmentsApi";
+
+import {
+  getResourceAvailability,
+  type AvailableSlot,
+} from "../api/backendAvailabilityApi";
+
+import { normalizeSector } from "../utils/sectorMapping";
+
+type Customer = {
+  id: number;
+  fullName: string;
+};
+
+type Props = {
+  sectorId: SectorId;
+};
+
+const BASE_URL = (
+  import.meta.env.VITE_API_BASE_URL ??
+  "http://localhost:5187"
+).replace(/\/$/, "");
+
+function errorText(error: unknown): string {
+  return error instanceof Error
+    ? error.message
+    : "Beklenmeyen bir hata oluştu.";
+}
+
+function todayInTurkey(): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Istanbul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+
+  const value = (type: string) =>
+    parts.find((p) => p.type === type)?.value ?? "";
+
+  return `${value("year")}-${value("month")}-${value("day")}`;
+}
+
+export default function BackendAppointmentCreatePanel({
+  sectorId,
+}: Props) {
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [services, setServices] = useState<BackendService[]>([]);
+  const [resources, setResources] = useState<BackendResource[]>([]);
+
+  const [customerId, setCustomerId] = useState("");
+  const [serviceId, setServiceId] = useState("");
+  const [resourceId, setResourceId] = useState("");
+
+  const [date, setDate] = useState(todayInTurkey);
+  const [slots, setSlots] = useState<AvailableSlot[]>([]);
+  const [selectedSlot, setSelectedSlot] =
+    useState<AvailableSlot | null>(null);
+
+  const [notes, setNotes] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [checking, setChecking] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+
+    async function loadData() {
+      setLoading(true);
+
+      try {
+        const [customerResponse, serviceData, resourceData] =
+          await Promise.all([
+            fetch(`${BASE_URL}/api/Customers`),
+            getBackendServices(),
+            getBackendResources(),
+          ]);
+
+        if (!customerResponse.ok) {
+          throw new Error(
+            `Müşteriler alınamadı: ${customerResponse.status}`
+          );
+        }
+
+        const customerData =
+          (await customerResponse.json()) as Customer[];
+
+        if (!alive) return;
+
+        setCustomers(customerData);
+        setServices(serviceData);
+        setResources(resourceData);
+      } catch (err) {
+        if (alive) setError(errorText(err));
+      } finally {
+        if (alive) setLoading(false);
+      }
+    }
+
+    void loadData();
+
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const filteredServices = services.filter(
+    (s) => normalizeSector(s.sector) === sectorId
+  );
+
+  const filteredResources = resources.filter(
+    (r) =>
+      normalizeSector(r.sector) === sectorId &&
+      r.isActive
+  );
+
+  const selectedService = filteredServices.find(
+    (s) => s.id === Number(serviceId)
+  );
+
+  // Kaynak, hizmet veya tarih değişince önceki
+  // müsait saatler artık geçerli değildir.
+  useEffect(() => {
+    setSlots([]);
+    setSelectedSlot(null);
+    setMessage("");
+  }, [resourceId, serviceId, date, sectorId]);
+
+  async function checkAvailability() {
+    if (!resourceId || !serviceId || !date) {
+      setError("Önce hizmet, kaynak ve tarih seç.");
+      return;
+    }
+
+    setChecking(true);
+    setError("");
+    setMessage("");
+    setSelectedSlot(null);
+    setSlots([]);
+
+    try {
+      const response = await getResourceAvailability(
+        Number(resourceId),
+        Number(serviceId),
+        date
+      );
+
+      // Geçmiş saatleri seçimden çıkarıyoruz.
+      const available = response.availableSlots.filter(
+        (slot) => new Date(slot.startUtc).getTime() > Date.now()
+      );
+
+      setSlots(available);
+
+      if (available.length === 0) {
+        setMessage("Bu tarih için uygun saat bulunamadı.");
+      } else {
+        setMessage(
+          `${available.length} uygun saat bulundu. Birini seçebilirsin.`
+        );
+      }
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  async function handleSubmit(
+    event: FormEvent<HTMLFormElement>
+  ) {
+    event.preventDefault();
+
+    if (saving) return;
+
+    setError("");
+    setMessage("");
+
+    if (!customerId || !serviceId || !resourceId || !selectedSlot) {
+      setError("Müşteri, hizmet, kaynak ve müsait saat seçmelisin.");
+      return;
+    }
+
+    setSaving(true);
+
+    try {
+      // Kayıttan hemen önce müsaitliği yeniden kontrol ediyoruz.
+      const latest = await getResourceAvailability(
+        Number(resourceId),
+        Number(serviceId),
+        date
+      );
+
+      const stillAvailable = latest.availableSlots.some(
+        (slot) =>
+          slot.startUtc === selectedSlot.startUtc &&
+          slot.endUtc === selectedSlot.endUtc
+      );
+
+      if (!stillAvailable) {
+        setSelectedSlot(null);
+        setSlots(latest.availableSlots.filter(
+          (slot) => new Date(slot.startUtc).getTime() > Date.now()
+        ));
+        throw new Error(
+          "Seçilen saat artık müsait değil. Yeni bir saat seç."
+        );
+      }
+
+      const created = await createBackendAppointment({
+        customerId: Number(customerId),
+        serviceId: Number(serviceId),
+        resourceId: Number(resourceId),
+        startTime: selectedSlot.startUtc,
+        endTime: selectedSlot.endUtc,
+        notes: notes.trim() || null,
+      });
+
+      setMessage(
+        `Randevu kaydedildi! ID: ${created?.id ?? "API onayladı"}`
+      );
+
+      setSelectedSlot(null);
+      setSlots([]);
+      setNotes("");
+
+      window.dispatchEvent(
+        new Event("mod44:appointments-updated")
+      );
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const inputClass =
+    "w-full rounded-xl border border-[#304963] bg-[#0b1728] p-3 text-sm text-white";
+
+  return (
+    <section className="space-y-5 rounded-2xl border border-cyan-500/30 bg-[#101d30] p-6 text-white">
+      <div>
+        <h2 className="text-xl font-bold">
+          Gerçek Randevu Oluştur
+        </h2>
+        <p className="mt-1 text-sm text-slate-400">
+          PostgreSQL bağlantılı müsait saat seçimi
+        </p>
+      </div>
+
+      {loading ? (
+        <p>Veriler yükleniyor...</p>
+      ) : (
+        <form
+          onSubmit={(event) => void handleSubmit(event)}
+          className="space-y-5"
+        >
+          <div className="grid gap-4 md:grid-cols-2">
+            <label className="space-y-2 text-sm">
+              <span>Müşteri</span>
+              <select
+                required
+                value={customerId}
+                onChange={(e) => setCustomerId(e.target.value)}
+                className={inputClass}
+              >
+                <option value="">Müşteri seçiniz</option>
+                {customers.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.fullName}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="space-y-2 text-sm">
+              <span>Hizmet</span>
+              <select
+                required
+                value={serviceId}
+                onChange={(e) => setServiceId(e.target.value)}
+                className={inputClass}
+              >
+                <option value="">Hizmet seçiniz</option>
+                {filteredServices.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} ({s.durationMinutes} dk)
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="space-y-2 text-sm">
+              <span>Aktif kaynak</span>
+              <select
+                required
+                value={resourceId}
+                onChange={(e) => setResourceId(e.target.value)}
+                className={inputClass}
+              >
+                <option value="">Kaynak seçiniz</option>
+                {filteredResources.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.name} ({r.type})
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="space-y-2 text-sm">
+              <span>Randevu tarihi</span>
+              <input
+                type="date"
+                required
+                min={todayInTurkey()}
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+                className={`${inputClass} [color-scheme:dark]`}
+              />
+            </label>
+          </div>
+
+          <button
+            type="button"
+            disabled={
+              checking || saving ||
+              !resourceId || !serviceId || !date
+            }
+            onClick={() => void checkAvailability()}
+            className="rounded-xl border border-cyan-500/40 bg-cyan-500/10 px-5 py-3 text-sm font-semibold text-cyan-300 disabled:opacity-50"
+          >
+            {checking
+              ? "Müsaitlik kontrol ediliyor..."
+              : "Müsait Saatleri Göster"}
+          </button>
+
+          {slots.length > 0 && (
+            <div className="space-y-3">
+              <h3 className="text-sm font-semibold">
+                Uygun saatler ({slots.length})
+              </h3>
+
+              <div className="flex flex-wrap gap-2">
+                {slots.map((slot) => {
+                  const selected =
+                    selectedSlot?.startUtc === slot.startUtc;
+
+                  return (
+                    <button
+                      key={slot.startUtc}
+                      type="button"
+                      disabled={saving}
+                      onClick={() => setSelectedSlot(slot)}
+                      className={`rounded-xl border px-4 py-3 text-sm font-semibold transition ${
+                        selected
+                          ? "border-cyan-300 bg-cyan-500 text-white"
+                          : "border-[#304963] bg-[#0b1728] text-slate-300 hover:border-cyan-400"
+                      }`}
+                    >
+                      {slot.startTime}–{slot.endTime}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {selectedSlot && (
+            <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-sm text-emerald-300">
+              Seçilen saat: {selectedSlot.startTime}–
+              {selectedSlot.endTime}
+            </div>
+          )}
+
+          <label className="block space-y-2 text-sm">
+            <span>Not (isteğe bağlı)</span>
+            <textarea
+              rows={2}
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              className={inputClass}
+            />
+          </label>
+
+          <button
+            type="submit"
+            disabled={
+              saving || checking || !selectedSlot || !customerId
+            }
+            className="w-full rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 py-3 text-sm font-bold disabled:opacity-40"
+          >
+            {saving
+              ? "Randevu kaydediliyor..."
+              : "Seçilen Saatte Randevu Oluştur"}
+          </button>
+        </form>
+      )}
+
+      {error && (
+        <p role="alert" className="text-sm text-rose-400">
+          {error}
+        </p>
+      )}
+
+      {message && (
+        <p role="status" className="text-sm text-emerald-400">
+          {message}
+        </p>
+      )}
+    </section>
+  );
+}
