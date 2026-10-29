@@ -31,7 +31,6 @@ public class AppointmentRescheduleService
 		_availabilityService = availabilityService;
 		_bookingRunner = bookingRunner;
 	}
-
 	public async Task<bool> RescheduleAsync(
 		int appointmentId,
 		UpdateAppointmentTimeDto dto)
@@ -50,10 +49,24 @@ public class AppointmentRescheduleService
 		if (snapshot is null)
 			return false;
 
-		var resourceIds = GetResourceIds(snapshot);
+		return await _bookingRunner.ExecuteAppointmentAsync(
+			appointmentId,
 
-		return await _bookingRunner.ExecuteAsync(
-			resourceIds,
+			async () =>
+			{
+				var current = await _assignmentRepository
+					.GetAppointmentWithResourcesAsync(appointmentId);
+
+				if (current is null)
+				{
+					return (IReadOnlyCollection<int>)
+						GetResourceIds(snapshot);
+				}
+
+				return (IReadOnlyCollection<int>)
+					GetResourceIds(current);
+			},
+
 			async () =>
 			{
 				var current = await _assignmentRepository
@@ -62,21 +75,15 @@ public class AppointmentRescheduleService
 				if (current is null)
 					return false;
 
-				var currentIds = GetResourceIds(current);
-
-				if (!resourceIds.SequenceEqual(currentIds))
-				{
-					throw new InvalidOperationException(
-						"Resource assignments changed. Retry.");
-				}
-
 				if (current.Status != "Scheduled")
 				{
 					throw new InvalidOperationException(
 						"Only scheduled appointments can be rescheduled.");
 				}
 
-				foreach (var resourceId in currentIds)
+				var resourceIds = GetResourceIds(current);
+
+				foreach (var resourceId in resourceIds)
 				{
 					var available = await _availabilityService
 						.IsAvailableAsync(
@@ -93,9 +100,8 @@ public class AppointmentRescheduleService
 					}
 				}
 
-				var appointment =
-					await _appointmentRepository.GetByIdAsync(
-						appointmentId);
+				var appointment = await _appointmentRepository
+					.GetByIdAsync(appointmentId);
 
 				if (appointment is null)
 					return false;

@@ -70,6 +70,13 @@ public class AppointmentsController : ControllerBase
 				message = ex.Message
 			});
 		}
+		catch (KeyNotFoundException ex)
+		{
+			return NotFound(new
+			{
+				message = ex.Message
+			});
+		}
 		catch (InvalidOperationException ex)
 		{
 			return Conflict(new

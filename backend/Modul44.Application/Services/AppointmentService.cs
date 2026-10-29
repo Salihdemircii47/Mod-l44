@@ -12,6 +12,7 @@ public class AppointmentService : IAppointmentService
 	private readonly IGenericRepository<Service> _serviceRepository;
 	private readonly IGenericRepository<Resource> _resourceRepository;
 	private readonly IAvailabilityService _availabilityService;
+	private readonly IAppointmentResourceRepository _assignmentRepository;
 	private readonly IBookingTransactionRunner _bookingRunner;
 
 	public AppointmentService(
@@ -20,6 +21,7 @@ public class AppointmentService : IAppointmentService
 		IGenericRepository<Service> serviceRepository,
 		IGenericRepository<Resource> resourceRepository,
 		IAvailabilityService availabilityService,
+		IAppointmentResourceRepository assignmentRepository,
 		IBookingTransactionRunner bookingRunner)
 	{
 		_appointmentRepository = appointmentRepository;
@@ -27,16 +29,18 @@ public class AppointmentService : IAppointmentService
 		_serviceRepository = serviceRepository;
 		_resourceRepository = resourceRepository;
 		_availabilityService = availabilityService;
+		_assignmentRepository = assignmentRepository;
 		_bookingRunner = bookingRunner;
 	}
-
 
 	public async Task<List<AppointmentDto>> GetAllAsync()
 	{
 		var appointments =
 			await _appointmentRepository.GetWithDetailsAsync();
 
-		return appointments.Select(MapToDto).ToList();
+		return appointments
+			.Select(MapToDto)
+			.ToList();
 	}
 
 	public async Task<AppointmentDto?> GetByIdAsync(int id)
@@ -49,7 +53,6 @@ public class AppointmentService : IAppointmentService
 			: MapToDto(appointment);
 	}
 
-
 	public async Task<AppointmentDto> CreateAsync(
 		CreateAppointmentDto dto)
 	{
@@ -61,6 +64,14 @@ public class AppointmentService : IAppointmentService
 				"Valid UTC appointment times are required.");
 		}
 
+		if (dto.CustomerId <= 0 ||
+			dto.ServiceId <= 0 ||
+			dto.ResourceId <= 0)
+		{
+			throw new ArgumentException(
+				"Customer, service and resource IDs must be valid.");
+		}
+
 		return await _bookingRunner.ExecuteAsync(
 			new[] { dto.ResourceId },
 			async () =>
@@ -69,22 +80,28 @@ public class AppointmentService : IAppointmentService
 					.GetByIdAsync(dto.CustomerId);
 
 				if (customer is null)
+				{
 					throw new ArgumentException(
 						"Customer not found.");
+				}
 
 				var service = await _serviceRepository
 					.GetByIdAsync(dto.ServiceId);
 
 				if (service is null)
+				{
 					throw new ArgumentException(
 						"Service not found.");
+				}
 
 				var resource = await _resourceRepository
 					.GetByIdAsync(dto.ResourceId);
 
 				if (resource is null || !resource.IsActive)
+				{
 					throw new ArgumentException(
 						"Resource unavailable.");
+				}
 
 				if (!string.Equals(
 					service.Sector,
@@ -119,6 +136,13 @@ public class AppointmentService : IAppointmentService
 					Status = "Scheduled"
 				};
 
+				appointment.AppointmentResources.Add(
+					new AppointmentResource
+					{
+						ResourceId = dto.ResourceId,
+						Role = "Primary"
+					});
+
 				await _appointmentRepository.AddAsync(appointment);
 				await _appointmentRepository.SaveChangesAsync();
 
@@ -130,27 +154,63 @@ public class AppointmentService : IAppointmentService
 			});
 	}
 
-	public async Task<bool> CancelAsync(int id)
+	public async Task<bool> CancelAsync(int appointmentId)
 	{
-		var appointment =
-			await _appointmentRepository.GetByIdAsync(id);
-
-		if (appointment is null)
-			return false;
-
-		if (appointment.Status != "Scheduled")
+		if (appointmentId <= 0)
 		{
-			throw new InvalidOperationException(
-				"Only scheduled appointments can be cancelled.");
+			throw new ArgumentException(
+				"Invalid appointment ID.");
 		}
 
-		appointment.Status = "Cancelled";
+		return await _bookingRunner.ExecuteAppointmentAsync(
+			appointmentId,
 
-		_appointmentRepository.Update(appointment);
+			async () =>
+			{
+				var appointment = await _assignmentRepository
+					.GetAppointmentWithResourcesAsync(appointmentId);
 
-		await _appointmentRepository.SaveChangesAsync();
+				if (appointment is null)
+				{
+					// No resource locks are required for a
+					// record that does not exist.
+					return Array.Empty<int>();
+				}
 
-		return true;
+				return (IReadOnlyCollection<int>)
+					appointment.AppointmentResources
+						.Select(x => x.ResourceId)
+						.Append(appointment.ResourceId)
+						.Distinct()
+						.OrderBy(x => x)
+						.ToList();
+			},
+
+			async () =>
+			{
+				var appointment = await _appointmentRepository
+					.GetByIdAsync(appointmentId);
+
+				if (appointment is null)
+					return false;
+
+				if (appointment.Status == "Cancelled")
+					return true;
+
+				if (appointment.Status != "Scheduled")
+				{
+					throw new InvalidOperationException(
+						"Only scheduled appointments can be cancelled.");
+				}
+
+				appointment.Status = "Cancelled";
+
+				_appointmentRepository.Update(appointment);
+
+				await _appointmentRepository.SaveChangesAsync();
+
+				return true;
+			});
 	}
 
 	private static AppointmentDto MapToDto(

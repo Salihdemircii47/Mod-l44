@@ -11,7 +11,8 @@ public class BookingTransactionRunner : IBookingTransactionRunner
 {
 	private readonly AppDbContext _context;
 
-	private const int LockNamespace = 440044;
+	private const int ResourceLockNamespace = 440044;
+	private const int AppointmentLockNamespace = 440045;
 
 	public BookingTransactionRunner(AppDbContext context)
 	{
@@ -22,16 +23,15 @@ public class BookingTransactionRunner : IBookingTransactionRunner
 		IEnumerable<int> resourceIds,
 		Func<Task<T>> operation)
 	{
+		ArgumentNullException.ThrowIfNull(resourceIds);
+		ArgumentNullException.ThrowIfNull(operation);
+
 		var ids = resourceIds
 			.Distinct()
-			.OrderBy(x => x)
+			.OrderBy(id => id)
 			.ToList();
 
-		if (ids.Count == 0 || ids.Any(x => x <= 0))
-		{
-			throw new ArgumentException(
-				"At least one valid resource is required.");
-		}
+		ValidateResourceIds(ids, allowEmpty: false);
 
 		await using var transaction =
 			await _context.Database.BeginTransactionAsync(
@@ -41,7 +41,8 @@ public class BookingTransactionRunner : IBookingTransactionRunner
 		{
 			foreach (var resourceId in ids)
 			{
-				await LockResourceAsync(
+				await AcquireLockAsync(
+					ResourceLockNamespace,
 					resourceId,
 					transaction);
 			}
@@ -58,9 +59,72 @@ public class BookingTransactionRunner : IBookingTransactionRunner
 			throw;
 		}
 	}
+	
+	public async Task<T> ExecuteAppointmentAsync<T>(
+		int appointmentId,
+		Func<Task<IReadOnlyCollection<int>>> loadResourceIds,
+		Func<Task<T>> operation)
+	{
+		if (appointmentId <= 0)
+		{
+			throw new ArgumentException(
+				"Invalid appointment ID.");
+		}
 
-	private async Task LockResourceAsync(
-		int resourceId,
+		ArgumentNullException.ThrowIfNull(loadResourceIds);
+		ArgumentNullException.ThrowIfNull(operation);
+
+		await using var transaction =
+			await _context.Database.BeginTransactionAsync(
+				IsolationLevel.ReadCommitted);
+
+		try
+		{
+			await AcquireLockAsync(
+				AppointmentLockNamespace,
+				appointmentId,
+				transaction);
+
+			var loadedIds = await loadResourceIds();
+
+			if (loadedIds is null)
+			{
+				throw new InvalidOperationException(
+					"Resource assignments could not be loaded.");
+			}
+
+			var resourceIds = loadedIds
+				.Distinct()
+				.OrderBy(id => id)
+				.ToList();
+
+			ValidateResourceIds(
+				resourceIds,
+				allowEmpty: true);
+
+			foreach (var resourceId in resourceIds)
+			{
+				await AcquireLockAsync(
+					ResourceLockNamespace,
+					resourceId,
+					transaction);
+			}
+
+			var result = await operation();
+
+			await transaction.CommitAsync();
+
+			return result;
+		}
+		catch
+		{
+			await transaction.RollbackAsync();
+			throw;
+		}
+	}
+	private async Task AcquireLockAsync(
+		int namespaceId,
+		int objectId,
 		IDbContextTransaction transaction)
 	{
 		var connection = _context.Database.GetDbConnection();
@@ -70,18 +134,36 @@ public class BookingTransactionRunner : IBookingTransactionRunner
 		command.Transaction = transaction.GetDbTransaction();
 
 		command.CommandText =
-			"SELECT pg_advisory_xact_lock(@namespace_id, @resource_id)";
+			"SELECT pg_advisory_xact_lock(@namespace_id, @object_id)";
 
 		var namespaceParameter = command.CreateParameter();
 		namespaceParameter.ParameterName = "namespace_id";
-		namespaceParameter.Value = LockNamespace;
+		namespaceParameter.Value = namespaceId;
+
 		command.Parameters.Add(namespaceParameter);
 
-		var resourceParameter = command.CreateParameter();
-		resourceParameter.ParameterName = "resource_id";
-		resourceParameter.Value = resourceId;
-		command.Parameters.Add(resourceParameter);
+		var objectParameter = command.CreateParameter();
+		objectParameter.ParameterName = "object_id";
+		objectParameter.Value = objectId;
+
+		command.Parameters.Add(objectParameter);
 
 		await command.ExecuteScalarAsync();
+	}
+	private static void ValidateResourceIds(
+		IReadOnlyCollection<int> resourceIds,
+		bool allowEmpty)
+	{
+		if (!allowEmpty && resourceIds.Count == 0)
+		{
+			throw new ArgumentException(
+				"At least one resource is required.");
+		}
+
+		if (resourceIds.Any(id => id <= 0))
+		{
+			throw new ArgumentException(
+				"Resource IDs must be positive.");
+		}
 	}
 }
